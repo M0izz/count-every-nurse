@@ -89,3 +89,15 @@ The client reconstructs the group from Semaphore's public membership events, che
 ## Scope and deployment
 
 This is a minimal contract/client demonstration, not a hospital identity provider, production relay, or audited deployment. A real deployment needs an independently reviewed membership process, secure voter devices, a pinned and reproducibly built dependency set, reliable chain access, independent contract verification, and a privacy-preserving transaction submission strategy. Do not treat an untrusted or public RPC, browser extension, relay, or hosted prover as private by default.
+
+## Independently verifying a tally
+
+Anyone with a public RPC endpoint and the ballot-manager address can reconstruct the tally from `VoteCast` events and compare it with the contract's `getBallot` state:
+
+```sh
+$env:RPC_URL = "<public RPC URL>"
+$env:BALLOT_MANAGER_ADDRESS = "<deployed BallotManager address>"
+npx tsx scripts/verify-tally.ts <ballot-id>
+```
+
+The verifier checks that each logged choice is in range, each ballot nullifier appears only once, and the per-option event counts exactly match the on-chain tallies at the latest block. This provides a reproducible state-and-event consistency check; it does not independently prove the Semaphore verifier's correctness, identify the real-world voters, or conceal individual choices. Choices remain public in this version of the contract.

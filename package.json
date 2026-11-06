@@ -8,7 +8,8 @@
     "test": "forge test",
     "typecheck": "tsc --noEmit",
     "demo:38": "tsx scripts/demo-38.ts",
-    "identity": "tsx src/client.ts"
+    "identity": "tsx src/client.ts",
+    "verify:tally": "tsx scripts/verify-tally.ts"
   },
   "dependencies": {
     "@semaphore-protocol/contracts": "4.14.5",

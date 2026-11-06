@@ -66,7 +66,7 @@ $env:SEMAPHORE_ADDRESS = "<deployed Semaphore address>"
 npm run demo:38
 ```
 
-The script generates 38 throwaway Semaphore identities in process, enrolls their commitments, creates a ballot, generates 38 real local proofs, submits them, and checks that the public on-chain tally is exactly 38 (19/19). It then verifies rejection of a repeated proof, a non-member proof attempt, a malformed choice, a proof replayed into another ballot, and a vote after closing. The identities are not written to disk by this demo. All transactions share one local submitter, so this demonstrates contract/proof behavior and tally verification—not production anonymity, independent voter devices, or resistance to metadata correlation.
+The script generates 38 throwaway Semaphore identities in process, enrolls their commitments, creates a ballot, generates 38 real local proofs, submits them, and checks that the public on-chain tally is exactly 38 (19/19). It then verifies rejection of a repeated proof, a non-member proof attempt, a malformed choice, a proof replayed into another ballot, and a vote after closing. The identities are not written to disk by this demo. Without `BALLOT_RELAY_URL`, votes use the local transaction account; with it, votes use the configured relay while setup and negative-case simulations still use the local account. This demonstrates contract/proof behavior and tally verification—not production anonymity, independent voter devices, or resistance to metadata correlation.
 
 ## Voter-side CLI
 
@@ -85,6 +85,40 @@ npm run identity -- vote <ballot-id> <choice-index> --identity .\identities\my-v
 ```
 
 The client reconstructs the group from Semaphore's public membership events, checks the reconstructed root and size against chain state, and generates a proof locally. It aborts rather than proving against a mismatched roster. `choice-index` is zero-based in the published option order.
+
+## Ward admin workflow
+
+The same CLI can create a ward, enroll identity commitments from a JSON file, open a ballot, and inspect public state. Admin commands use `TRANSACTION_PRIVATE_KEY` as the ward-admin wallet:
+
+```sh
+npm run identity -- create-ward 38
+npm run identity -- add-members 1 --commitments .\commitments.json
+npm run identity -- open-ballot 1 --question "Should the ward file a formal complaint?" --options .\options.json --closes-at 1794000000
+npm run identity -- inspect-ward 1
+npm run identity -- inspect-ballot 1
+```
+
+`commitments.json` is a JSON array of decimal strings (the commitments displayed when nurses create identities), and `options.json` is a JSON array of 2–8 option strings, for example `["File a formal complaint","Do not file a complaint"]`. Protect the identity files; share only the decimal commitments with the admin. The closing time is a Unix timestamp in seconds and must be in the future according to the connected chain. Each admin command waits for transaction confirmation before printing success.
+
+## Optional self-hosted transaction relay
+
+The voter still creates their Semaphore identity and proof locally. To avoid publishing a voter-controlled wallet as the transaction submitter, an operator can run this minimal relayer using a separate funded transaction account:
+
+```sh
+$env:RPC_URL = "http://127.0.0.1:8545"
+$env:BALLOT_MANAGER_ADDRESS = "<deployed BallotManager address>"
+$env:TRANSACTION_PRIVATE_KEY = "<dedicated relayer key>"
+npm run relay
+```
+
+By default the relay binds only to `127.0.0.1`. To accept remote connections, explicitly set `RELAY_HOST` and `RELAY_PORT`; do not expose this minimal unauthenticated service directly to the internet. Remote use requires HTTPS, authenticated/abuse-controlled hosting, and a privacy review. It accepts only a ballot ID and proof, simulates `castVote` before spending gas, and does not write request bodies or client addresses to application logs. Voters set `BALLOT_RELAY_URL` or pass `--relay <url>` when voting:
+
+```sh
+$env:BALLOT_RELAY_URL = "http://127.0.0.1:8787"
+npm run identity -- vote 1 0 --identity .\identities\my-vote.identity
+```
+
+The relay hides the voter-controlled transaction sender from the chain; it does **not** make a vote anonymous from the relay operator or network observers. The relay can observe the proof, choice message, request timing, and source network connection; a public RPC or reverse proxy may also log connection data. It broadcasts each proof immediately, does not batch requests, and is unauthenticated, so a real deployment needs an audited relayer, abuse controls, monitoring, operator separation, and an independently reviewed privacy design. A dedicated relay does not conceal individual choices.
 
 ## Scope and deployment
 

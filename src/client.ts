@@ -5,6 +5,7 @@ import { Identity } from "@semaphore-protocol/identity"
 import { Group } from "@semaphore-protocol/group"
 import { generateProof } from "@semaphore-protocol/proof"
 import {
+  decodeEventLog,
   createPublicClient,
   createWalletClient,
   defineChain,
@@ -25,6 +26,21 @@ const ballotAbi = parseAbi([
   "function addWardMembers(uint256 wardId, uint256[] identityCommitments)",
   "function openBallot(uint256 wardId, string question, string[] options, uint64 closesAt) returns (uint256 ballotId)",
   "function castVote(uint256 ballotId, (uint256 merkleTreeDepth, uint256 merkleTreeRoot, uint256 nullifier, uint256 message, uint256 scope, uint256[8] points) proof)",
+  "event WardCreated(uint256 indexed wardId, uint256 indexed semaphoreGroupId, address indexed admin)",
+  "event BallotOpened(uint256 indexed ballotId, uint256 indexed wardId, uint256 scope, string question, string[] options, uint64 closesAt)",
+  "error InvalidExpectedVoters()",
+  "error InvalidMemberBatch()",
+  "error NotWardAdmin()",
+  "error RosterIncomplete()",
+  "error RosterFrozen()",
+  "error InvalidBallot()",
+  "error InvalidQuestion()",
+  "error InvalidOptions()",
+  "error InvalidClosingTime()",
+  "error BallotClosed()",
+  "error InvalidScope()",
+  "error InvalidChoice()",
+  "error NullifierAlreadyUsed()",
 ])
 
 const semaphoreAbi = parseAbi([
@@ -35,7 +51,7 @@ const semaphoreAbi = parseAbi([
   "event MembersAdded(uint256 indexed groupId, uint256 startIndex, uint256[] identityCommitments, uint256 merkleTreeRoot)",
 ])
 
-type SemaphoreProof = Awaited<ReturnType<typeof generateProof>>
+export type SemaphoreProof = Awaited<ReturnType<typeof generateProof>>
 
 export async function createLocalIdentity(identityPath: string): Promise<void> {
   const identity = new Identity()
@@ -146,7 +162,59 @@ export function toContractProof(proof: SemaphoreProof) {
   } as const
 }
 
-export async function castProof(ballotId: bigint, proof: SemaphoreProof): Promise<void> {
+export async function castProof(
+  ballotId: bigint,
+  proof: SemaphoreProof,
+  relayUrl = process.env.BALLOT_RELAY_URL,
+): Promise<void> {
+  if (relayUrl) {
+    const { publicClient } = await getPublicClients()
+    const response = await fetch(new URL("/vote", relayUrl), {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      signal: AbortSignal.timeout(60_000),
+      body: JSON.stringify({
+        ballotId: ballotId.toString(),
+        proof: {
+          merkleTreeDepth: proof.merkleTreeDepth,
+          merkleTreeRoot: proof.merkleTreeRoot,
+          nullifier: proof.nullifier,
+          message: proof.message,
+          scope: proof.scope,
+          points: proof.points,
+        },
+      }),
+    })
+    const payload: unknown = await response.json().catch(() => undefined)
+    if (!response.ok) {
+      const error =
+        typeof payload === "object" &&
+        payload !== null &&
+        "error" in payload &&
+        typeof payload.error === "string"
+          ? payload.error
+          : `Relay returned HTTP ${response.status}.`
+      throw new Error(error)
+    }
+    if (
+      typeof payload !== "object" ||
+      payload === null ||
+      !("transactionHash" in payload) ||
+      typeof payload.transactionHash !== "string" ||
+      !/^0x[0-9a-fA-F]{64}$/.test(payload.transactionHash)
+    ) {
+      throw new Error("Relay response did not contain a transaction hash.")
+    }
+    const receipt = await publicClient.waitForTransactionReceipt({
+      hash: payload.transactionHash as Hex,
+    })
+    if (receipt.status !== "success") {
+      throw new Error(`Relayed vote transaction ${receipt.transactionHash} reverted.`)
+    }
+    console.log(`Relayed vote transaction: ${receipt.transactionHash}`)
+    return
+  }
+
   const { publicClient, walletClient, managerAddress } = await getWalletClients()
   const hash = await walletClient.writeContract({
     account: walletClient.account,
@@ -168,7 +236,7 @@ export async function readBallot(ballotId: bigint) {
   })
 }
 
-export async function createWard(expectedVoters: number): Promise<void> {
+export async function createWard(expectedVoters: number): Promise<bigint> {
   const { publicClient, walletClient, managerAddress } = await getWalletClients()
   const hash = await walletClient.writeContract({
     account: walletClient.account,
@@ -177,7 +245,22 @@ export async function createWard(expectedVoters: number): Promise<void> {
     functionName: "createWard",
     args: [expectedVoters],
   })
-  await publicClient.waitForTransactionReceipt({ hash })
+  const receipt = await publicClient.waitForTransactionReceipt({ hash })
+  const event = receipt.logs
+    .filter((log) => log.address.toLowerCase() === managerAddress.toLowerCase())
+    .map((log) =>
+      decodeEventLog({
+        abi: ballotAbi,
+        data: log.data,
+        topics: log.topics,
+        strict: true,
+      }),
+    )
+    .find((entry) => entry.eventName === "WardCreated")
+  if (!event || event.eventName !== "WardCreated") {
+    throw new Error(`Confirmed ward creation ${hash} did not emit WardCreated.`)
+  }
+  return event.args.wardId
 }
 
 export async function addWardMembers(wardId: bigint, commitments: bigint[]): Promise<void> {
@@ -197,7 +280,7 @@ export async function openBallot(
   question: string,
   options: string[],
   closesAt: bigint,
-): Promise<void> {
+): Promise<bigint> {
   const { publicClient, walletClient, managerAddress } = await getWalletClients()
   const hash = await walletClient.writeContract({
     account: walletClient.account,
@@ -206,7 +289,22 @@ export async function openBallot(
     functionName: "openBallot",
     args: [wardId, question, options, closesAt],
   })
-  await publicClient.waitForTransactionReceipt({ hash })
+  const receipt = await publicClient.waitForTransactionReceipt({ hash })
+  const event = receipt.logs
+    .filter((log) => log.address.toLowerCase() === managerAddress.toLowerCase())
+    .map((log) =>
+      decodeEventLog({
+        abi: ballotAbi,
+        data: log.data,
+        topics: log.topics,
+        strict: true,
+      }),
+    )
+    .find((entry) => entry.eventName === "BallotOpened")
+  if (!event || event.eventName !== "BallotOpened") {
+    throw new Error(`Confirmed ballot creation ${hash} did not emit BallotOpened.`)
+  }
+  return event.args.ballotId
 }
 
 export async function simulateVote(ballotId: bigint, proof: SemaphoreProof): Promise<void> {
@@ -241,6 +339,16 @@ export async function getBallotCount(): Promise<bigint> {
     address: managerAddress,
     abi: ballotAbi,
     functionName: "ballotCount",
+  })
+}
+
+export async function getWard(wardId: bigint) {
+  const { publicClient, managerAddress } = await getPublicClients()
+  return publicClient.readContract({
+    address: managerAddress,
+    abi: ballotAbi,
+    functionName: "wards",
+    args: [wardId],
   })
 }
 
@@ -377,31 +485,123 @@ async function main(): Promise<void> {
     }
     const identity = await loadIdentity(argumentAfter(args, "--identity"))
     const proof = await makeProof(identity, BigInt(ballotText), BigInt(choiceText))
-    await castProof(BigInt(ballotText), proof)
+    await castProof(BigInt(ballotText), proof, optionalArgument(args, "--relay"))
     console.log("Vote submitted. The transaction contains a proof, not an identity commitment.")
     return
   }
 
+  if (command === "create-ward") {
+    const expectedVoters = positiveSafeInteger(args[0], "expected voter count")
+    const wardId = await createWard(expectedVoters)
+    console.log(`Created ward ${wardId} for ${expectedVoters} expected members.`)
+    return
+  }
+
+  if (command === "add-members") {
+    const wardId = positiveBigInt(args[0], "ward ID")
+    const commitments = await readCommitments(argumentAfter(args, "--commitments"))
+    await addWardMembers(wardId, commitments)
+    console.log(`Added ${commitments.length} commitments to ward ${wardId}.`)
+    return
+  }
+
+  if (command === "open-ballot") {
+    const wardId = positiveBigInt(args[0], "ward ID")
+    const question = argumentAfter(args, "--question")
+    const options = await readOptions(argumentAfter(args, "--options"))
+    const closesAt = positiveBigInt(argumentAfter(args, "--closes-at"), "closing timestamp")
+    const ballotId = await openBallot(wardId, question, options, closesAt)
+    console.log(`Opened ballot ${ballotId} for ward ${wardId}.`)
+    return
+  }
+
+  if (command === "inspect-ward") {
+    const wardId = positiveBigInt(args[0], "ward ID")
+    const ward = await getWard(wardId)
+    console.log(JSON.stringify(ward, bigintJsonReplacer, 2))
+    return
+  }
+
+  if (command === "inspect-ballot") {
+    const ballotId = positiveBigInt(args[0], "ballot ID")
+    const ballot = await readBallot(ballotId)
+    console.log(JSON.stringify(ballot, bigintJsonReplacer, 2))
+    return
+  }
+
   throw new Error(
-    "Usage: npm run identity -- identity --out <new-file> | vote <ballot-id> <choice-index> --identity <file>",
+    [
+      "Usage:",
+      "  npm run identity -- identity --out <new-file>",
+      "  npm run identity -- create-ward <expected-voters>",
+      "  npm run identity -- add-members <ward-id> --commitments <json-file>",
+      "  npm run identity -- open-ballot <ward-id> --question <text> --options <json-file> --closes-at <unix-seconds>",
+      "  npm run identity -- inspect-ward <ward-id>",
+      "  npm run identity -- inspect-ballot <ballot-id>",
+      "  npm run identity -- vote <ballot-id> <choice-index> --identity <file> [--relay <url>]",
+    ].join("\n"),
   )
+}
+
+async function readCommitments(file: string): Promise<bigint[]> {
+  const value: unknown = JSON.parse(await readFile(resolve(file), "utf8"))
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.some((entry) => typeof entry !== "string" || !/^[1-9]\d*$/.test(entry))
+  ) {
+    throw new Error("Commitment file must be a non-empty JSON array of positive decimal strings.")
+  }
+  return value.map((entry: string) => BigInt(entry))
+}
+
+async function readOptions(file: string): Promise<string[]> {
+  const value: unknown = JSON.parse(await readFile(resolve(file), "utf8"))
+  if (
+    !Array.isArray(value) ||
+    value.length < 2 ||
+    value.length > 8 ||
+    value.some((entry) => typeof entry !== "string" || entry.trim().length === 0)
+  ) {
+    throw new Error("Options file must be a JSON array of 2 to 8 non-empty strings.")
+  }
+  return value
+}
+
+function positiveSafeInteger(value: string | undefined, label: string): number {
+  if (!value || !/^[1-9]\d*$/.test(value)) {
+    throw new Error(`${label} must be a positive integer.`)
+  }
+  const parsed = Number(value)
+  if (!Number.isSafeInteger(parsed)) throw new Error(`${label} is too large.`)
+  return parsed
+}
+
+function positiveBigInt(value: string | undefined, label: string): bigint {
+  if (!value || !/^[1-9]\d*$/.test(value)) {
+    throw new Error(`${label} must be a positive integer.`)
+  }
+  return BigInt(value)
+}
+
+function optionalArgument(args: string[], flag: string): string | undefined {
+  const index = args.indexOf(flag)
+  if (index < 0) return undefined
+  if (!args[index + 1]) throw new Error(`Missing ${flag} value.`)
+  return args[index + 1]
+}
+
+function bigintJsonReplacer(_key: string, value: unknown): unknown {
+  return typeof value === "bigint" ? value.toString() : value
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
   main()
-    .then(() => exitAfterOutput(0))
+    .then(() => {
+      process.exitCode = 0
+    })
     .catch((error: unknown) => {
       console.error(error)
-      exitAfterOutput(1)
+      process.exitCode = 1
     })
-}
-
-function exitAfterOutput(code: number): void {
-  let pending = 2
-  const finish = (): void => {
-    pending -= 1
-    if (pending === 0) process.exit(code)
-  }
-  process.stdout.write("", finish)
-  process.stderr.write("", finish)
 }

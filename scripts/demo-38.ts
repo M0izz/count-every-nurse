@@ -98,7 +98,9 @@ async function main(): Promise<void> {
   )
 
   console.log("PASS: replay, non-member, malformed-choice, cross-ballot, and closed-ballot checks completed.")
-  console.log(`Demo submitter: one local transaction account; ballot ${ballotId} is independently readable on-chain.`)
+  console.log(
+    `Demo submitter: ${process.env.BALLOT_RELAY_URL ? "the configured self-hosted relay" : "one local transaction account"}; ballot ${ballotId} is independently readable on-chain.`,
+  )
   console.log("Demo-only note: all 38 throwaway identities run in this process; this does not model production metadata privacy.")
 }
 
